@@ -2,32 +2,25 @@ package com.sktpj.dynavorgmonsters
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
+import android.graphics.Shader
 import android.view.MotionEvent
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import kotlin.math.abs
 import kotlin.math.hypot
 
-/**
- * Hosts the existing game unchanged and renders the active player character from an 8x8 sprite sheet.
- *
- * Character replacement rule: replace drawable-nodpi/spikeman_minotaur_sprite_sheet.webp with another
- * 8 columns x 8 rows sheet that follows the row order below. No gameplay code change is required.
- */
-class SpriteGameContainer(context: Context) : FrameLayout(context) {
+class SpriteGameContainer(
+    context: Context,
+    private val playerDefinition: CharacterDefinition,
+    private val enemyDefinition: CharacterDefinition,
+) : FrameLayout(context) {
     private companion object {
-        const val COLUMNS = 8
-        const val ROWS = 8
-        const val FPS = 15f
-        const val FRAME_COUNT_PER_MOTION = 8
-        const val ACTION_SECONDS = FRAME_COUNT_PER_MOTION / FPS
-
         const val ROW_FORWARD = 0
         const val ROW_BACKWARD = 1
         const val ROW_JUMP = 2
@@ -52,19 +45,23 @@ class SpriteGameContainer(context: Context) : FrameLayout(context) {
         const val SPECIAL_2_Y = 970f
     }
 
+    private data class MotionFrame(val row: Int, val frame: Int)
+
     private val gameView = GameView(context)
     private val spritePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-    private val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val spriteSheet: Bitmap? = BitmapFactory.decodeResource(
-        resources,
-        R.drawable.spikeman_minotaur_sprite_sheet,
-    )
+    private val arenaPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val arenaTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER }
+    private val playerSheet: Bitmap? = CharacterRoster.loadBitmap(context, playerDefinition)
+    private val enemySheet: Bitmap? = CharacterRoster.loadBitmap(context, enemyDefinition)
 
     private val logicField = GameView::class.java.getDeclaredField("logic").apply { isAccessible = true }
     private val joystickHorizontalField = GameView::class.java.getDeclaredField("joystickHorizontal").apply { isAccessible = true }
 
-    private var actionRow: Int? = null
-    private var actionStartedNanos = 0L
+    private var playerActionRow: Int? = null
+    private var playerActionStartedNanos = 0L
+    private var enemyActionRow: Int? = null
+    private var enemyActionStartedNanos = 0L
+    private var previousEnemyAttackFlashSeconds = 0f
     private val animationEpochNanos = System.nanoTime()
 
     init {
@@ -91,8 +88,8 @@ class SpriteGameContainer(context: Context) : FrameLayout(context) {
                 else -> null
             }
             if (row != null && row != ROW_GUARD) {
-                actionRow = row
-                actionStartedNanos = System.nanoTime()
+                playerActionRow = row
+                playerActionStartedNanos = System.nanoTime()
             }
         }
         return super.dispatchTouchEvent(event)
@@ -100,52 +97,170 @@ class SpriteGameContainer(context: Context) : FrameLayout(context) {
 
     override fun dispatchDraw(canvas: Canvas) {
         super.dispatchDraw(canvas)
-        val sheet = spriteSheet ?: return
+        if (width <= 0 || height <= 0) return
+        val playerBitmap = playerSheet ?: return
+        val enemyBitmap = enemySheet ?: return
         val logic = runCatching { logicField.get(gameView) as GameLogic }.getOrNull() ?: return
-        val player = logic.player
         val horizontal = runCatching { joystickHorizontalField.getFloat(gameView) }.getOrDefault(0f)
         val now = System.nanoTime()
 
-        val actionElapsed = if (actionStartedNanos == 0L) Float.MAX_VALUE else (now - actionStartedNanos) / 1_000_000_000f
-        if (actionElapsed >= ACTION_SECONDS) actionRow = null
-
-        val row = when {
-            actionRow != null -> actionRow!!
-            player.guarding -> ROW_GUARD
-            player.y < GameLogic.GROUND_Y - 0.5f || abs(player.vy) > 1f -> ROW_JUMP
-            abs(player.vx) > 8f || abs(horizontal) > 0.08f -> if (player.vx * player.facing >= 0f) ROW_FORWARD else ROW_BACKWARD
-            else -> ROW_FORWARD
+        expireAction(now, isPlayer = true)
+        val enemyFlash = logic.enemyAttackFlashSeconds
+        if (enemyFlash > 0f && previousEnemyAttackFlashSeconds <= 0f) {
+            enemyActionRow = ROW_PUNCH
+            enemyActionStartedNanos = now
         }
+        previousEnemyAttackFlashSeconds = enemyFlash
+        expireAction(now, isPlayer = false)
 
-        val moving = abs(player.vx) > 8f || abs(horizontal) > 0.08f
-        val frame = when {
-            actionRow != null -> (actionElapsed * FPS).toInt().coerceIn(0, FRAME_COUNT_PER_MOTION - 1)
-            row == ROW_FORWARD && !moving && !player.guarding && player.y >= GameLogic.GROUND_Y - 0.5f -> 0
-            else -> (((now - animationEpochNanos) / 1_000_000_000f) * FPS).toInt() % FRAME_COUNT_PER_MOTION
-        }
-
-        val cellWidth = sheet.width / COLUMNS
-        val cellHeight = sheet.height / ROWS
-        val src = Rect(
-            frame * cellWidth,
-            row * cellHeight,
-            (frame + 1) * cellWidth,
-            (row + 1) * cellHeight,
+        val playerMotion = resolveMotion(
+            definition = playerDefinition,
+            fighter = logic.player,
+            actionRow = playerActionRow,
+            actionStartedNanos = playerActionStartedNanos,
+            horizontalInput = horizontal,
+            now = now,
+            guarding = logic.player.guarding,
+        )
+        val enemyMotion = resolveMotion(
+            definition = enemyDefinition,
+            fighter = logic.enemy,
+            actionRow = enemyActionRow,
+            actionStartedNanos = enemyActionStartedNanos,
+            horizontalInput = 0f,
+            now = now,
+            guarding = false,
         )
 
         canvas.save()
         canvas.scale(width / WORLD_WIDTH, height / WORLD_HEIGHT)
-        canvas.translate(player.x, player.y)
-        canvas.scale(player.facing, 1f)
 
-        maskPaint.color = Color.argb(165, 26, 25, 29)
-        canvas.drawOval(RectF(-128f, -310f, 128f, 18f), maskPaint)
+        redrawArenaBehindFighter(
+            canvas,
+            RectF(logic.player.x - 145f, logic.player.y - 330f, logic.player.x + 145f, logic.player.y + 24f),
+        )
+        redrawArenaBehindFighter(
+            canvas,
+            RectF(logic.enemy.x - 245f, logic.enemy.y - 260f, logic.enemy.x + 170f, logic.enemy.y + 24f),
+        )
 
-        val dst = RectF(-198f, -396f, 198f, 0f)
-        canvas.drawBitmap(sheet, src, dst, spritePaint)
+        drawSprite(canvas, playerBitmap, playerDefinition, logic.player, playerMotion)
+        drawSprite(canvas, enemyBitmap, enemyDefinition, logic.enemy, enemyMotion)
         canvas.restore()
 
         postInvalidateOnAnimation()
+    }
+
+    private fun expireAction(now: Long, isPlayer: Boolean) {
+        val definition = if (isPlayer) playerDefinition else enemyDefinition
+        val started = if (isPlayer) playerActionStartedNanos else enemyActionStartedNanos
+        val active = if (isPlayer) playerActionRow else enemyActionRow
+        if (active == null || started == 0L) return
+        val elapsed = (now - started) / 1_000_000_000f
+        val duration = definition.columns / definition.fps
+        if (elapsed >= duration) {
+            if (isPlayer) playerActionRow = null else enemyActionRow = null
+        }
+    }
+
+    private fun resolveMotion(
+        definition: CharacterDefinition,
+        fighter: Fighter,
+        actionRow: Int?,
+        actionStartedNanos: Long,
+        horizontalInput: Float,
+        now: Long,
+        guarding: Boolean,
+    ): MotionFrame {
+        val moving = abs(fighter.vx) > 8f || abs(horizontalInput) > 0.08f
+        val row = when {
+            actionRow != null -> actionRow
+            guarding -> ROW_GUARD
+            fighter.y < GameLogic.GROUND_Y - 0.5f || abs(fighter.vy) > 1f -> ROW_JUMP
+            moving -> if (fighter.vx * fighter.facing >= 0f) ROW_FORWARD else ROW_BACKWARD
+            else -> ROW_FORWARD
+        }
+
+        val frame = when {
+            actionRow != null && actionStartedNanos != 0L -> {
+                val elapsed = (now - actionStartedNanos) / 1_000_000_000f
+                (elapsed * definition.fps).toInt().coerceIn(0, definition.columns - 1)
+            }
+            row == ROW_FORWARD && !moving && !guarding && fighter.y >= GameLogic.GROUND_Y - 0.5f -> 0
+            else -> (((now - animationEpochNanos) / 1_000_000_000f) * definition.fps).toInt() % definition.columns
+        }
+        return MotionFrame(row, frame)
+    }
+
+    private fun drawSprite(
+        canvas: Canvas,
+        sheet: Bitmap,
+        definition: CharacterDefinition,
+        fighter: Fighter,
+        motion: MotionFrame,
+    ) {
+        val left = motion.frame * sheet.width / definition.columns
+        val right = (motion.frame + 1) * sheet.width / definition.columns
+        val top = motion.row * sheet.height / definition.rows
+        val bottom = (motion.row + 1) * sheet.height / definition.rows
+        val src = Rect(left, top, right, bottom)
+
+        canvas.save()
+        canvas.translate(fighter.x, fighter.y)
+        canvas.scale(fighter.facing, 1f)
+        val halfWidth = definition.drawWidth / 2f
+        val dst = RectF(-halfWidth, -definition.drawHeight, halfWidth, 0f)
+        canvas.drawBitmap(sheet, src, dst, spritePaint)
+        canvas.restore()
+    }
+
+    private fun redrawArenaBehindFighter(canvas: Canvas, bounds: RectF) {
+        canvas.save()
+        canvas.clipRect(bounds)
+        drawArena(canvas)
+        canvas.restore()
+    }
+
+    private fun drawArena(canvas: Canvas) {
+        arenaPaint.shader = LinearGradient(
+            0f,
+            0f,
+            0f,
+            700f,
+            Color.rgb(22, 24, 42),
+            Color.rgb(96, 55, 48),
+            Shader.TileMode.CLAMP,
+        )
+        canvas.drawRect(0f, 0f, WORLD_WIDTH, WORLD_HEIGHT, arenaPaint)
+        arenaPaint.shader = null
+
+        arenaPaint.color = Color.rgb(58, 45, 55)
+        canvas.drawRect(0f, 235f, WORLD_WIDTH, 680f, arenaPaint)
+        for (row in 0 until 4) {
+            val y = 295f + row * 82f
+            arenaPaint.color = if (row % 2 == 0) Color.rgb(104, 66, 62) else Color.rgb(79, 58, 67)
+            canvas.drawRect(0f, y, WORLD_WIDTH, y + 50f, arenaPaint)
+            arenaPaint.color = Color.rgb(218, 170, 112)
+            for (seat in 0 until 24) {
+                val x = 28f + seat * 82f + if (row % 2 == 0) 0f else 36f
+                canvas.drawCircle(x, y + 20f, 10f, arenaPaint)
+            }
+        }
+        arenaPaint.color = Color.rgb(130, 116, 96)
+        for (x in 0..WORLD_WIDTH.toInt() step 240) {
+            canvas.drawRect(x.toFloat(), 185f, x + 28f, 680f, arenaPaint)
+        }
+        arenaPaint.color = Color.rgb(48, 42, 38)
+        canvas.drawRect(0f, 680f, WORLD_WIDTH, WORLD_HEIGHT, arenaPaint)
+        arenaPaint.color = Color.rgb(156, 126, 82)
+        canvas.drawOval(RectF(140f, 720f, 1780f, 900f), arenaPaint)
+        arenaPaint.color = Color.rgb(78, 64, 52)
+        canvas.drawOval(RectF(205f, 758f, 1715f, 890f), arenaPaint)
+        arenaPaint.color = Color.rgb(190, 156, 104)
+        canvas.drawRect(110f, GameLogic.GROUND_Y + 5f, 1810f, GameLogic.GROUND_Y + 40f, arenaPaint)
+        arenaTextPaint.textSize = 42f
+        arenaTextPaint.color = Color.argb(150, 255, 238, 198)
+        canvas.drawText("DYNA VORG ARENA", 960f, 645f, arenaTextPaint)
     }
 
     private fun inside(x: Float, y: Float, cx: Float, cy: Float, radius: Float): Boolean =
