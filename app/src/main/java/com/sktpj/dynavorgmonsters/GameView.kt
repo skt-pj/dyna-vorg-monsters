@@ -18,6 +18,7 @@ import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.roundToInt
 import kotlin.math.sin
+import kotlin.random.Random
 
 class GameView(context: Context) : View(context) {
     private enum class ButtonType { PUNCH, KICK, GUARD, SPECIAL_1, SPECIAL_2 }
@@ -35,8 +36,22 @@ class GameView(context: Context) : View(context) {
         val y: Float,
         val damage: Float,
         val target: CombatTarget,
+        val attackKind: AttackKind,
         val weakPoint: Boolean,
         val guarded: Boolean,
+        val impactStrength: Float,
+        val durationSeconds: Float,
+        var ageSeconds: Float = 0f,
+    )
+
+    private data class ImpactParticle(
+        var x: Float,
+        var y: Float,
+        var vx: Float,
+        var vy: Float,
+        val length: Float,
+        val width: Float,
+        val color: Int,
         val durationSeconds: Float,
         var ageSeconds: Float = 0f,
     )
@@ -64,6 +79,7 @@ class GameView(context: Context) : View(context) {
     )
     private val pointerButtons = mutableMapOf<Int, ButtonType>()
     private val impactEffects = mutableListOf<ImpactFx>()
+    private val impactParticles = mutableListOf<ImpactParticle>()
     private var lastFrameNanos = 0L
     private var running = true
     private var hitStopRemainingSeconds = 0f
@@ -91,6 +107,7 @@ class GameView(context: Context) : View(context) {
 
     override fun onDetachedFromWindow() {
         running = false
+        clearImpactFeedback()
         toneGenerator?.release()
         toneGenerator = null
         super.onDetachedFromWindow()
@@ -123,6 +140,7 @@ class GameView(context: Context) : View(context) {
         drawArena(canvas)
         drawProjectiles(canvas)
         drawFighters(canvas)
+        drawImpactParticles(canvas)
         drawImpactEffects(canvas)
         canvas.restore()
 
@@ -213,6 +231,7 @@ class GameView(context: Context) : View(context) {
 
     private fun clearImpactFeedback() {
         impactEffects.clear()
+        impactParticles.clear()
         hitStopRemainingSeconds = 0f
         cameraShakeRemainingSeconds = 0f
         cameraShakeDurationSeconds = 0f
@@ -264,20 +283,24 @@ class GameView(context: Context) : View(context) {
         triggerCameraShake(shakeDuration, shakeStrength)
 
         val duration = when {
-            event.weakPoint -> 0.34f
-            isPlayerHit -> 0.28f
-            else -> 0.24f
+            event.weakPoint -> 0.42f
+            isPlayerHit -> 0.34f
+            event.guarded -> 0.28f
+            else -> 0.30f
         }
         impactEffects += ImpactFx(
             x = event.impactX,
             y = event.impactY,
             damage = event.damage,
             target = event.target,
+            attackKind = event.attackKind,
             weakPoint = event.weakPoint,
             guarded = event.guarded,
+            impactStrength = event.impactStrength,
             durationSeconds = duration,
         )
         while (impactEffects.size > 12) impactEffects.removeAt(0)
+        spawnImpactParticles(event)
 
         val haptic = when {
             event.guarded -> HapticFeedbackConstants.KEYBOARD_TAP
@@ -301,6 +324,62 @@ class GameView(context: Context) : View(context) {
         runCatching { toneGenerator?.startTone(tone, toneMs) }
     }
 
+    private fun spawnImpactParticles(event: CombatEvent) {
+        val count = when {
+            event.guarded -> 10
+            event.weakPoint -> 28
+            event.target == CombatTarget.PLAYER -> 18
+            else -> 14
+        }
+        val baseColor = impactColor(event.target, event.weakPoint, event.guarded)
+        val random = Random(
+            event.impactX.toBits() xor
+                event.impactY.toBits() xor
+                (event.attackKind.ordinal * 0x45d9f3b) xor
+                event.damage.toBits(),
+        )
+        val direction = when (event.target) {
+            CombatTarget.ENEMY -> if (event.impactX >= logic.player.x) 1f else -1f
+            CombatTarget.PLAYER -> if (event.impactX >= logic.enemy.x) 1f else -1f
+        }
+        val fullRadial = event.attackKind == AttackKind.SPECIAL_2
+        val baseAngle = if (direction >= 0f) 0f else Math.PI.toFloat()
+        val spread = when (event.attackKind) {
+            AttackKind.PUNCH -> 1.15f
+            AttackKind.KICK -> 1.45f
+            AttackKind.SPECIAL_1 -> 2.10f
+            AttackKind.SPECIAL_2 -> Math.PI.toFloat() * 2f
+            AttackKind.ENEMY_ATTACK, AttackKind.DIRECT -> 1.75f
+        }
+        repeat(count) { index ->
+            val angle = if (fullRadial) {
+                random.nextFloat() * Math.PI.toFloat() * 2f
+            } else {
+                baseAngle + (random.nextFloat() - 0.5f) * spread
+            }
+            val tierScale = when {
+                event.weakPoint -> 1.32f
+                event.target == CombatTarget.PLAYER -> 1.10f
+                event.guarded -> 0.82f
+                else -> 1f
+            }
+            val speed = (310f + random.nextFloat() * 510f) * tierScale
+            val upwardKick = if (index % 3 == 0) -90f - random.nextFloat() * 120f else 0f
+            val duration = (0.20f + random.nextFloat() * 0.22f) * if (event.weakPoint) 1.12f else 1f
+            impactParticles += ImpactParticle(
+                x = event.impactX,
+                y = event.impactY,
+                vx = cos(angle) * speed,
+                vy = sin(angle) * speed + upwardKick,
+                length = (26f + random.nextFloat() * 44f) * tierScale,
+                width = (4.5f + random.nextFloat() * 5.5f) * if (event.weakPoint) 1.15f else 1f,
+                color = if (index % 5 == 0 && !event.guarded && event.target != CombatTarget.PLAYER) Color.WHITE else baseColor,
+                durationSeconds = duration,
+            )
+        }
+        while (impactParticles.size > 192) impactParticles.removeAt(0)
+    }
+
     private fun triggerCameraShake(durationSeconds: Float, strength: Float) {
         if (cameraShakeRemainingSeconds <= 0f || strength >= cameraShakeStrength) {
             cameraShakeDurationSeconds = durationSeconds
@@ -315,6 +394,17 @@ class GameView(context: Context) : View(context) {
         if (dt <= 0f) return
         impactEffects.forEach { it.ageSeconds += dt }
         impactEffects.removeAll { it.ageSeconds >= it.durationSeconds }
+
+        val damping = (1f - 4.6f * dt).coerceAtLeast(0f)
+        impactParticles.forEach { particle ->
+            particle.ageSeconds += dt
+            particle.x += particle.vx * dt
+            particle.y += particle.vy * dt
+            particle.vx *= damping
+            particle.vy = particle.vy * damping + 420f * dt
+        }
+        impactParticles.removeAll { it.ageSeconds >= it.durationSeconds }
+
         cameraShakeRemainingSeconds = (cameraShakeRemainingSeconds - dt).coerceAtLeast(0f)
         if (cameraShakeRemainingSeconds <= 0f) cameraShakeStrength = 0f
     }
@@ -404,12 +494,26 @@ class GameView(context: Context) : View(context) {
 
     private fun drawProjectiles(canvas: Canvas) {
         logic.projectiles.forEach { projectile ->
+            val direction = if (projectile.vx >= 0f) -1f else 1f
+            for (trail in 4 downTo 1) {
+                val alpha = 24 + trail * 24
+                val distance = trail * 24f
+                paint.color = Color.argb(alpha, 90, 224, 255)
+                canvas.drawCircle(projectile.x + direction * distance, projectile.y, 13f + trail * 2.8f, paint)
+            }
+            paint.color = Color.argb(120, 150, 244, 255)
+            canvas.drawCircle(projectile.x, projectile.y, 48f, paint)
             paint.color = Color.rgb(90, 224, 255)
             canvas.drawCircle(projectile.x, projectile.y, 31f, paint)
+            paint.color = Color.WHITE
+            canvas.drawCircle(projectile.x, projectile.y, 12f, paint)
             paint.style = Paint.Style.STROKE
             paint.strokeWidth = 8f
-            paint.color = Color.argb(170, 210, 250, 255)
+            paint.color = Color.argb(190, 210, 250, 255)
             canvas.drawCircle(projectile.x, projectile.y, 45f, paint)
+            paint.strokeWidth = 3f
+            paint.color = Color.argb(120, 210, 250, 255)
+            canvas.drawCircle(projectile.x, projectile.y, 60f, paint)
             paint.style = Paint.Style.FILL
         }
     }
@@ -430,6 +534,9 @@ class GameView(context: Context) : View(context) {
             paint.strokeWidth = 14f
             paint.color = Color.argb(210, 90, 220, 255)
             canvas.drawArc(RectF(-115f, -245f, 135f, 20f), -74f, 148f, false, paint)
+            paint.strokeWidth = 4f
+            paint.color = Color.argb(100, 190, 248, 255)
+            canvas.drawArc(RectF(-135f, -265f, 155f, 40f), -74f, 148f, false, paint)
             paint.style = Paint.Style.FILL
         }
 
@@ -464,14 +571,31 @@ class GameView(context: Context) : View(context) {
         canvas.drawRect(15f, -35f, 58f, 12f, paint)
 
         if (logic.playerAttackFlashSeconds > 0f) {
-            paint.color = Color.argb(205, 255, 230, 96)
+            val phase = (logic.playerAttackFlashSeconds / 0.16f).coerceIn(0f, 1f)
+            paint.color = Color.argb((135f + 90f * phase).roundToInt(), 255, 230, 96)
             canvas.drawCircle(150f, -115f, 58f + logic.playerAttackFlashSeconds * 80f, paint)
+            paint.style = Paint.Style.STROKE
+            paint.strokeCap = Paint.Cap.ROUND
+            paint.strokeWidth = 24f
+            paint.color = Color.argb((190f * phase).roundToInt(), 255, 246, 180)
+            canvas.drawArc(RectF(35f, -245f, 285f, 5f), -72f, 144f, false, paint)
+            paint.strokeWidth = 7f
+            paint.color = Color.argb((230f * phase).roundToInt(), 255, 255, 255)
+            canvas.drawArc(RectF(60f, -220f, 260f, -20f), -68f, 136f, false, paint)
+            paint.strokeCap = Paint.Cap.BUTT
+            paint.style = Paint.Style.FILL
         }
         if (logic.playerSpecialFlashSeconds > 0f) {
+            val phase = (logic.playerSpecialFlashSeconds / 0.28f).coerceIn(0f, 1f)
+            paint.color = Color.argb((80f * phase).roundToInt(), 92, 230, 255)
+            canvas.drawCircle(0f, -120f, 170f + logic.playerSpecialFlashSeconds * 180f, paint)
             paint.style = Paint.Style.STROKE
             paint.strokeWidth = 18f
-            paint.color = Color.argb(210, 92, 230, 255)
+            paint.color = Color.argb((220f * phase).roundToInt(), 92, 230, 255)
             canvas.drawCircle(0f, -120f, 155f + logic.playerSpecialFlashSeconds * 120f, paint)
+            paint.strokeWidth = 5f
+            paint.color = Color.argb((170f * phase).roundToInt(), 220, 252, 255)
+            canvas.drawCircle(0f, -120f, 205f + logic.playerSpecialFlashSeconds * 165f, paint)
             paint.style = Paint.Style.FILL
         }
         if (f.hitFlashSeconds > 0f) {
@@ -521,8 +645,14 @@ class GameView(context: Context) : View(context) {
         }
 
         if (logic.enemyAttackFlashSeconds > 0f) {
-            paint.color = Color.argb(205, 255, 115, 75)
+            val phase = (logic.enemyAttackFlashSeconds / 0.18f).coerceIn(0f, 1f)
+            paint.color = Color.argb((205f * phase).roundToInt(), 255, 115, 75)
             canvas.drawCircle(160f, -120f, 65f + logic.enemyAttackFlashSeconds * 70f, paint)
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 16f
+            paint.color = Color.argb((190f * phase).roundToInt(), 255, 177, 128)
+            canvas.drawArc(RectF(40f, -245f, 290f, 5f), -65f, 130f, false, paint)
+            paint.style = Paint.Style.FILL
         }
         if (f.hitFlashSeconds > 0f) {
             val alpha = (185f * (f.hitFlashSeconds / 0.18f).coerceIn(0f, 1f)).roundToInt()
@@ -532,47 +662,121 @@ class GameView(context: Context) : View(context) {
         canvas.restore()
     }
 
+    private fun drawImpactParticles(canvas: Canvas) {
+        paint.style = Paint.Style.STROKE
+        paint.strokeCap = Paint.Cap.ROUND
+        impactParticles.forEach { particle ->
+            val progress = (particle.ageSeconds / particle.durationSeconds).coerceIn(0f, 1f)
+            val fade = (1f - progress).coerceIn(0f, 1f)
+            val speed = hypot(particle.vx.toDouble(), particle.vy.toDouble()).toFloat().coerceAtLeast(1f)
+            val nx = particle.vx / speed
+            val ny = particle.vy / speed
+            val trailLength = particle.length * (0.40f + 0.60f * fade)
+            val tailX = particle.x - nx * trailLength
+            val tailY = particle.y - ny * trailLength
+            val r = Color.red(particle.color)
+            val g = Color.green(particle.color)
+            val b = Color.blue(particle.color)
+
+            paint.strokeWidth = particle.width * 2.1f
+            paint.color = Color.argb((90f * fade).roundToInt().coerceIn(0, 255), r, g, b)
+            canvas.drawLine(tailX, tailY, particle.x, particle.y, paint)
+
+            paint.strokeWidth = particle.width
+            paint.color = Color.argb((245f * fade).roundToInt().coerceIn(0, 255), r, g, b)
+            canvas.drawLine(tailX, tailY, particle.x, particle.y, paint)
+
+            paint.style = Paint.Style.FILL
+            paint.color = Color.argb((230f * fade).roundToInt().coerceIn(0, 255), r, g, b)
+            canvas.drawCircle(particle.x, particle.y, particle.width * 0.72f, paint)
+            paint.style = Paint.Style.STROKE
+        }
+        paint.strokeCap = Paint.Cap.BUTT
+        paint.style = Paint.Style.FILL
+    }
+
     private fun drawImpactEffects(canvas: Canvas) {
         impactEffects.forEach { fx ->
             val progress = (fx.ageSeconds / fx.durationSeconds).coerceIn(0f, 1f)
             val fade = (1f - progress).coerceIn(0f, 1f)
-            val baseColor = when {
-                fx.guarded -> Color.rgb(105, 225, 255)
-                fx.target == CombatTarget.PLAYER -> Color.rgb(255, 82, 72)
-                fx.weakPoint -> Color.rgb(255, 176, 38)
-                else -> Color.rgb(255, 235, 135)
-            }
-            val alpha = (255f * fade).roundToInt().coerceIn(0, 255)
+            val baseColor = impactColor(fx.target, fx.weakPoint, fx.guarded)
+            val r = Color.red(baseColor)
+            val g = Color.green(baseColor)
+            val b = Color.blue(baseColor)
+            val strength = fx.impactStrength.coerceIn(0.35f, 1f)
 
+            val coreProgress = (progress / 0.32f).coerceIn(0f, 1f)
+            val coreFade = 1f - coreProgress
+            val coreRadius = (if (fx.weakPoint) 94f else 62f) * (0.55f + coreProgress * 0.85f) * strength
+            paint.style = Paint.Style.FILL
+            paint.color = Color.argb((105f * coreFade).roundToInt().coerceIn(0, 255), r, g, b)
+            canvas.drawCircle(fx.x, fx.y, coreRadius * 1.55f, paint)
+            paint.color = Color.argb((235f * coreFade).roundToInt().coerceIn(0, 255), r, g, b)
+            canvas.drawCircle(fx.x, fx.y, coreRadius, paint)
+            paint.color = Color.argb((255f * coreFade).roundToInt().coerceIn(0, 255), 255, 255, 255)
+            canvas.drawCircle(fx.x, fx.y, coreRadius * 0.34f, paint)
+
+            val innerMax = if (fx.weakPoint) 158f else if (fx.target == CombatTarget.PLAYER) 126f else 112f
+            val outerMax = if (fx.weakPoint) 248f else if (fx.target == CombatTarget.PLAYER) 188f else 166f
             paint.style = Paint.Style.STROKE
-            paint.strokeWidth = if (fx.weakPoint) 12f else 8f
-            paint.color = Color.argb(alpha, Color.red(baseColor), Color.green(baseColor), Color.blue(baseColor))
-            val ringRadius = 28f + progress * if (fx.weakPoint) 92f else 68f
-            canvas.drawCircle(fx.x, fx.y, ringRadius, paint)
+            paint.strokeWidth = if (fx.weakPoint) 16f else 10f
+            paint.color = Color.argb((245f * fade).roundToInt().coerceIn(0, 255), r, g, b)
+            canvas.drawCircle(fx.x, fx.y, 22f + progress * innerMax, paint)
 
-            val rays = if (fx.weakPoint) 12 else 8
-            val inner = 18f + progress * 20f
-            val outer = if (fx.weakPoint) 120f else 88f
+            val outerProgress = ((progress - 0.07f) / 0.93f).coerceIn(0f, 1f)
+            val outerFade = (1f - outerProgress).coerceIn(0f, 1f)
+            paint.strokeWidth = if (fx.weakPoint) 7f else 5f
+            paint.color = Color.argb((175f * outerFade).roundToInt().coerceIn(0, 255), r, g, b)
+            canvas.drawCircle(fx.x, fx.y, 48f + outerProgress * outerMax, paint)
+
+            val rays = if (fx.weakPoint) 16 else 10
+            val inner = 20f + progress * 28f
+            val outer = if (fx.weakPoint) 154f else 104f
+            paint.strokeWidth = if (fx.weakPoint) 8f else 5f
+            paint.color = Color.argb((225f * fade).roundToInt().coerceIn(0, 255), r, g, b)
             for (i in 0 until rays) {
                 val angle = i * (Math.PI * 2.0 / rays)
+                val rayScale = if (i % 2 == 0) 1f else 0.68f
                 val x1 = fx.x + (cos(angle) * inner).toFloat()
                 val y1 = fx.y + (sin(angle) * inner).toFloat()
-                val x2 = fx.x + (cos(angle) * outer * fade).toFloat()
-                val y2 = fx.y + (sin(angle) * outer * fade).toFloat()
+                val x2 = fx.x + (cos(angle) * outer * rayScale * fade).toFloat()
+                val y2 = fx.y + (sin(angle) * outer * rayScale * fade).toFloat()
                 canvas.drawLine(x1, y1, x2, y2, paint)
+            }
+
+            if (fx.weakPoint) {
+                val starFade = (1f - (progress / 0.60f).coerceIn(0f, 1f)).coerceIn(0f, 1f)
+                paint.strokeWidth = 13f
+                paint.strokeCap = Paint.Cap.ROUND
+                paint.color = Color.argb((245f * starFade).roundToInt().coerceIn(0, 255), 255, 248, 210)
+                val star = 118f * starFade
+                canvas.drawLine(fx.x - star, fx.y, fx.x + star, fx.y, paint)
+                canvas.drawLine(fx.x, fx.y - star, fx.x, fx.y + star, paint)
+                val diagonal = star * 0.58f
+                canvas.drawLine(fx.x - diagonal, fx.y - diagonal, fx.x + diagonal, fx.y + diagonal, paint)
+                canvas.drawLine(fx.x - diagonal, fx.y + diagonal, fx.x + diagonal, fx.y - diagonal, paint)
+                paint.strokeCap = Paint.Cap.BUTT
             }
             paint.style = Paint.Style.FILL
 
-            textPaint.color = Color.argb(alpha, Color.red(baseColor), Color.green(baseColor), Color.blue(baseColor))
-            textPaint.textSize = if (fx.weakPoint) 48f else 36f
-            val popupY = fx.y - 58f - progress * 115f
+            textPaint.color = Color.argb((255f * fade).roundToInt().coerceIn(0, 255), r, g, b)
+            textPaint.textSize = if (fx.weakPoint) 52f else 38f
+            val popupY = fx.y - 68f - progress * 128f
             val damageLabel = if (fx.guarded) "GUARD  -${fx.damage.roundToInt()}" else "-${fx.damage.roundToInt()}"
             canvas.drawText(damageLabel, fx.x, popupY, textPaint)
             if (fx.weakPoint) {
-                textPaint.textSize = 35f
-                canvas.drawText("WEAK!", fx.x, popupY - 47f, textPaint)
+                textPaint.textSize = 39f
+                textPaint.color = Color.argb((255f * fade).roundToInt().coerceIn(0, 255), 255, 240, 165)
+                canvas.drawText("WEAK!", fx.x, popupY - 52f, textPaint)
             }
         }
+    }
+
+    private fun impactColor(target: CombatTarget, weakPoint: Boolean, guarded: Boolean): Int = when {
+        guarded -> Color.rgb(105, 225, 255)
+        target == CombatTarget.PLAYER -> Color.rgb(255, 82, 72)
+        weakPoint -> Color.rgb(255, 176, 38)
+        else -> Color.rgb(255, 235, 135)
     }
 
     private fun drawControls(canvas: Canvas) {
