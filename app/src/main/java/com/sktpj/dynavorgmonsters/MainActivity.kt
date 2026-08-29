@@ -29,7 +29,7 @@ class MainActivity : Activity() {
                 View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
                 View.SYSTEM_UI_FLAG_LAYOUT_STABLE
             )
-        Log.i(TAG, "app_start version=${BuildConfig.VERSION_NAME}")
+        Log.i(TAG, "app_start")
         showCharacterSelect()
     }
 
