@@ -63,4 +63,55 @@ class GameLogicTest {
         assertTrue(logic.special2())
         assertTrue(logic.enemy.hp < before)
     }
+
+    @Test
+    fun groundedPunchUsesBaseDamageOutsideHeadWeakPoint() {
+        logic.enemy.x = logic.player.x + 150f
+        logic.player.facing = 1f
+
+        assertTrue(logic.punch())
+
+        assertEquals(91f, logic.enemy.hp, 0.001f)
+        val event = logic.consumeCombatEvents().single()
+        assertFalse(event.weakPoint)
+        assertEquals(9f, event.damage, 0.001f)
+    }
+
+    @Test
+    fun aerialPunchOnHeadUsesWeakPointMultiplier() {
+        logic.enemy.x = logic.player.x + 150f
+        logic.player.facing = 1f
+        logic.player.y = GameLogic.GROUND_Y - 40f
+
+        assertTrue(logic.punch())
+
+        assertEquals(100f - 9f * GameLogic.WEAK_POINT_MULTIPLIER, logic.enemy.hp, 0.001f)
+    }
+
+    @Test
+    fun weakPointEventCarriesBoostedDamage() {
+        logic.enemy.x = logic.player.x + 150f
+        logic.player.facing = 1f
+        logic.player.y = GameLogic.GROUND_Y - 40f
+
+        assertTrue(logic.punch())
+
+        val event = logic.consumeCombatEvents().single()
+        assertTrue(event.weakPoint)
+        assertEquals(CombatTarget.ENEMY, event.target)
+        assertEquals(9f * GameLogic.WEAK_POINT_MULTIPLIER, event.damage, 0.001f)
+    }
+
+    @Test
+    fun specialTwoNeverUsesWeakPointMultiplier() {
+        logic.enemy.x = logic.player.x + 180f
+        logic.player.y = GameLogic.GROUND_Y - 80f
+
+        assertTrue(logic.special2())
+
+        assertEquals(82f, logic.enemy.hp, 0.001f)
+        val event = logic.consumeCombatEvents().single()
+        assertFalse(event.weakPoint)
+        assertEquals(18f, event.damage, 0.001f)
+    }
 }
