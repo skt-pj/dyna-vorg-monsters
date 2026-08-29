@@ -25,7 +25,7 @@ object CharacterRoster {
         CharacterDefinition(
             id = "minotaur",
             displayName = "ミノタウロス",
-            drawableResource = R.drawable.minotaur_sprite_sheet_v2,
+            drawableResource = R.drawable.spikeman_minotaur_sprite_sheet,
             columns = 8,
             drawWidth = 430f,
             drawHeight = 430f,
