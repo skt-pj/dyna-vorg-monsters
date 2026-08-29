@@ -8,9 +8,16 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.Shader
+import android.media.AudioManager
+import android.media.ToneGenerator
+import android.os.Build
+import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
+import kotlin.math.cos
 import kotlin.math.hypot
+import kotlin.math.roundToInt
+import kotlin.math.sin
 
 class GameView(context: Context) : View(context) {
     private enum class ButtonType { PUNCH, KICK, GUARD, SPECIAL_1, SPECIAL_2 }
@@ -21,6 +28,17 @@ class GameView(context: Context) : View(context) {
         val y: Float,
         val radius: Float,
         val label: String,
+    )
+
+    private data class ImpactFx(
+        val x: Float,
+        val y: Float,
+        val damage: Float,
+        val target: CombatTarget,
+        val weakPoint: Boolean,
+        val guarded: Boolean,
+        val durationSeconds: Float,
+        var ageSeconds: Float = 0f,
     )
 
     private val logic = GameLogic()
@@ -45,8 +63,14 @@ class GameView(context: Context) : View(context) {
         ControlButton(ButtonType.SPECIAL_2, 1680f, 970f, 82f, "特殊2"),
     )
     private val pointerButtons = mutableMapOf<Int, ButtonType>()
+    private val impactEffects = mutableListOf<ImpactFx>()
     private var lastFrameNanos = 0L
     private var running = true
+    private var hitStopRemainingSeconds = 0f
+    private var cameraShakeRemainingSeconds = 0f
+    private var cameraShakeDurationSeconds = 0f
+    private var cameraShakeStrength = 0f
+    private var toneGenerator: ToneGenerator? = null
 
     init {
         isFocusable = true
@@ -59,11 +83,16 @@ class GameView(context: Context) : View(context) {
         super.onAttachedToWindow()
         running = true
         lastFrameNanos = 0L
+        if (toneGenerator == null) {
+            toneGenerator = runCatching { ToneGenerator(AudioManager.STREAM_MUSIC, 55) }.getOrNull()
+        }
         postInvalidateOnAnimation()
     }
 
     override fun onDetachedFromWindow() {
         running = false
+        toneGenerator?.release()
+        toneGenerator = null
         super.onDetachedFromWindow()
     }
 
@@ -72,18 +101,32 @@ class GameView(context: Context) : View(context) {
         if (width <= 0 || height <= 0) return
 
         val now = System.nanoTime()
-        val dt = if (lastFrameNanos == 0L) 0f else ((now - lastFrameNanos) / 1_000_000_000.0).toFloat()
+        val rawDt = if (lastFrameNanos == 0L) 0f else ((now - lastFrameNanos) / 1_000_000_000.0).toFloat().coerceIn(0f, 0.05f)
         lastFrameNanos = now
 
         logic.setGuarding(pointerButtons.values.any { it == ButtonType.GUARD })
-        logic.update(dt, joystickHorizontal, joystickUpHeld)
+        val gameplayDt = if (hitStopRemainingSeconds > 0f) {
+            hitStopRemainingSeconds = (hitStopRemainingSeconds - rawDt).coerceAtLeast(0f)
+            0f
+        } else {
+            rawDt
+        }
+        logic.update(gameplayDt, joystickHorizontal, joystickUpHeld)
+        logic.consumeCombatEvents().forEach(::handleCombatEvent)
+        updatePresentation(rawDt)
 
         canvas.save()
         canvas.scale(width / GameLogic.WORLD_WIDTH, height / GameLogic.WORLD_HEIGHT)
+
+        canvas.save()
+        applyCameraShake(canvas)
         drawArena(canvas)
-        drawHud(canvas)
         drawProjectiles(canvas)
         drawFighters(canvas)
+        drawImpactEffects(canvas)
+        canvas.restore()
+
+        drawHud(canvas)
         drawControls(canvas)
         drawResult(canvas)
         canvas.restore()
@@ -104,6 +147,7 @@ class GameView(context: Context) : View(context) {
                 if (logic.winner != null) {
                     logic.reset()
                     clearControls()
+                    clearImpactFeedback()
                     invalidate()
                     return true
                 }
@@ -167,6 +211,14 @@ class GameView(context: Context) : View(context) {
         logic.setGuarding(false)
     }
 
+    private fun clearImpactFeedback() {
+        impactEffects.clear()
+        hitStopRemainingSeconds = 0f
+        cameraShakeRemainingSeconds = 0f
+        cameraShakeDurationSeconds = 0f
+        cameraShakeStrength = 0f
+    }
+
     private fun updateJoystick(x: Float, y: Float) {
         var dx = x - joystickCenterX
         var dy = y - joystickCenterY
@@ -185,6 +237,95 @@ class GameView(context: Context) : View(context) {
             logic.jump()
         }
         joystickUpHeld = newUpHeld
+    }
+
+    private fun handleCombatEvent(event: CombatEvent) {
+        val isPlayerHit = event.target == CombatTarget.PLAYER
+        val hitStop = when {
+            event.guarded -> 0.025f
+            event.weakPoint -> 0.075f
+            isPlayerHit -> 0.055f
+            else -> 0.045f
+        }
+        hitStopRemainingSeconds = maxOf(hitStopRemainingSeconds, hitStop)
+
+        val shakeDuration = when {
+            event.guarded -> 0.07f
+            event.weakPoint -> 0.18f
+            isPlayerHit -> 0.14f
+            else -> 0.12f
+        }
+        val shakeStrength = when {
+            event.guarded -> 8f
+            event.weakPoint -> 32f
+            isPlayerHit -> 24f
+            else -> 18f
+        } * event.impactStrength.coerceIn(0.35f, 1f)
+        triggerCameraShake(shakeDuration, shakeStrength)
+
+        val duration = when {
+            event.weakPoint -> 0.34f
+            isPlayerHit -> 0.28f
+            else -> 0.24f
+        }
+        impactEffects += ImpactFx(
+            x = event.impactX,
+            y = event.impactY,
+            damage = event.damage,
+            target = event.target,
+            weakPoint = event.weakPoint,
+            guarded = event.guarded,
+            durationSeconds = duration,
+        )
+        while (impactEffects.size > 12) impactEffects.removeAt(0)
+
+        val haptic = when {
+            event.guarded -> HapticFeedbackConstants.KEYBOARD_TAP
+            event.weakPoint -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.LONG_PRESS
+            isPlayerHit -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) HapticFeedbackConstants.REJECT else HapticFeedbackConstants.LONG_PRESS
+            else -> HapticFeedbackConstants.KEYBOARD_TAP
+        }
+        performHapticFeedback(haptic)
+
+        val tone = when {
+            event.guarded -> ToneGenerator.TONE_PROP_BEEP
+            event.weakPoint -> ToneGenerator.TONE_PROP_ACK
+            isPlayerHit -> ToneGenerator.TONE_PROP_NACK
+            else -> ToneGenerator.TONE_PROP_BEEP
+        }
+        val toneMs = when {
+            event.weakPoint -> 55
+            isPlayerHit -> 50
+            else -> 35
+        }
+        runCatching { toneGenerator?.startTone(tone, toneMs) }
+    }
+
+    private fun triggerCameraShake(durationSeconds: Float, strength: Float) {
+        if (cameraShakeRemainingSeconds <= 0f || strength >= cameraShakeStrength) {
+            cameraShakeDurationSeconds = durationSeconds
+            cameraShakeRemainingSeconds = durationSeconds
+            cameraShakeStrength = strength
+        } else {
+            cameraShakeRemainingSeconds = maxOf(cameraShakeRemainingSeconds, durationSeconds)
+        }
+    }
+
+    private fun updatePresentation(dt: Float) {
+        if (dt <= 0f) return
+        impactEffects.forEach { it.ageSeconds += dt }
+        impactEffects.removeAll { it.ageSeconds >= it.durationSeconds }
+        cameraShakeRemainingSeconds = (cameraShakeRemainingSeconds - dt).coerceAtLeast(0f)
+        if (cameraShakeRemainingSeconds <= 0f) cameraShakeStrength = 0f
+    }
+
+    private fun applyCameraShake(canvas: Canvas) {
+        if (cameraShakeRemainingSeconds <= 0f || cameraShakeDurationSeconds <= 0f) return
+        val ratio = (cameraShakeRemainingSeconds / cameraShakeDurationSeconds).coerceIn(0f, 1f)
+        val t = System.nanoTime() / 1_000_000_000.0
+        val x = (sin(t * 115.0) * cameraShakeStrength * ratio).toFloat()
+        val y = (cos(t * 153.0) * cameraShakeStrength * 0.6f * ratio).toFloat()
+        canvas.translate(x, y)
     }
 
     private fun drawArena(canvas: Canvas) {
@@ -333,6 +474,11 @@ class GameView(context: Context) : View(context) {
             canvas.drawCircle(0f, -120f, 155f + logic.playerSpecialFlashSeconds * 120f, paint)
             paint.style = Paint.Style.FILL
         }
+        if (f.hitFlashSeconds > 0f) {
+            val alpha = (150f * (f.hitFlashSeconds / 0.12f).coerceIn(0f, 1f)).roundToInt()
+            paint.color = Color.argb(alpha, 255, 88, 75)
+            canvas.drawOval(RectF(-105f, -285f, 135f, 18f), paint)
+        }
         canvas.restore()
     }
 
@@ -378,7 +524,55 @@ class GameView(context: Context) : View(context) {
             paint.color = Color.argb(205, 255, 115, 75)
             canvas.drawCircle(160f, -120f, 65f + logic.enemyAttackFlashSeconds * 70f, paint)
         }
+        if (f.hitFlashSeconds > 0f) {
+            val alpha = (185f * (f.hitFlashSeconds / 0.18f).coerceIn(0f, 1f)).roundToInt()
+            paint.color = Color.argb(alpha, 255, 241, 180)
+            canvas.drawOval(RectF(-245f, -250f, 165f, 18f), paint)
+        }
         canvas.restore()
+    }
+
+    private fun drawImpactEffects(canvas: Canvas) {
+        impactEffects.forEach { fx ->
+            val progress = (fx.ageSeconds / fx.durationSeconds).coerceIn(0f, 1f)
+            val fade = (1f - progress).coerceIn(0f, 1f)
+            val baseColor = when {
+                fx.guarded -> Color.rgb(105, 225, 255)
+                fx.target == CombatTarget.PLAYER -> Color.rgb(255, 82, 72)
+                fx.weakPoint -> Color.rgb(255, 176, 38)
+                else -> Color.rgb(255, 235, 135)
+            }
+            val alpha = (255f * fade).roundToInt().coerceIn(0, 255)
+
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = if (fx.weakPoint) 12f else 8f
+            paint.color = Color.argb(alpha, Color.red(baseColor), Color.green(baseColor), Color.blue(baseColor))
+            val ringRadius = 28f + progress * if (fx.weakPoint) 92f else 68f
+            canvas.drawCircle(fx.x, fx.y, ringRadius, paint)
+
+            val rays = if (fx.weakPoint) 12 else 8
+            val inner = 18f + progress * 20f
+            val outer = if (fx.weakPoint) 120f else 88f
+            for (i in 0 until rays) {
+                val angle = i * (Math.PI * 2.0 / rays)
+                val x1 = fx.x + (cos(angle) * inner).toFloat()
+                val y1 = fx.y + (sin(angle) * inner).toFloat()
+                val x2 = fx.x + (cos(angle) * outer * fade).toFloat()
+                val y2 = fx.y + (sin(angle) * outer * fade).toFloat()
+                canvas.drawLine(x1, y1, x2, y2, paint)
+            }
+            paint.style = Paint.Style.FILL
+
+            textPaint.color = Color.argb(alpha, Color.red(baseColor), Color.green(baseColor), Color.blue(baseColor))
+            textPaint.textSize = if (fx.weakPoint) 48f else 36f
+            val popupY = fx.y - 58f - progress * 115f
+            val damageLabel = if (fx.guarded) "GUARD  -${fx.damage.roundToInt()}" else "-${fx.damage.roundToInt()}"
+            canvas.drawText(damageLabel, fx.x, popupY, textPaint)
+            if (fx.weakPoint) {
+                textPaint.textSize = 35f
+                canvas.drawText("WEAK!", fx.x, popupY - 47f, textPaint)
+            }
+        }
     }
 
     private fun drawControls(canvas: Canvas) {
