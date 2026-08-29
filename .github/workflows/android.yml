@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -81,7 +84,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dyna-vorg-monsters-0.1.3-apks
+          name: dyna-vorg-monsters-0.1.4-apks
           path: dist/
           if-no-files-found: error
           retention-days: 30
