@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Base64
+import android.util.Log
 
 data class CharacterDefinition(
     val id: String,
@@ -18,11 +19,13 @@ data class CharacterDefinition(
 )
 
 object CharacterRoster {
+    private const val TAG = "DVMCharacter"
+
     val all: List<CharacterDefinition> = listOf(
         CharacterDefinition(
             id = "minotaur",
             displayName = "ミノタウロス",
-            drawableResource = R.drawable.spikeman_minotaur_sprite_sheet,
+            drawableResource = R.drawable.minotaur_sprite_sheet_v2,
             columns = 8,
             drawWidth = 430f,
             drawHeight = 430f,
@@ -47,12 +50,21 @@ object CharacterRoster {
 
     fun loadBitmap(context: Context, definition: CharacterDefinition): Bitmap? {
         definition.drawableResource?.let { resourceId ->
-            return BitmapFactory.decodeResource(context.resources, resourceId)
+            val bitmap = BitmapFactory.decodeResource(context.resources, resourceId)
+            if (bitmap == null) {
+                Log.e(TAG, "sprite_load_failed id=${definition.id} source=drawable")
+            } else {
+                Log.i(TAG, "sprite_loaded id=${definition.id} width=${bitmap.width} height=${bitmap.height}")
+            }
+            return bitmap
         }
 
         val directory = definition.assetDirectory ?: return null
         val partNames = context.assets.list(directory)?.sorted().orEmpty()
-        if (partNames.isEmpty()) return null
+        if (partNames.isEmpty()) {
+            Log.e(TAG, "sprite_load_failed id=${definition.id} source=assets reason=no_parts")
+            return null
+        }
 
         val encoded = buildString {
             partNames.forEach { fileName ->
@@ -61,7 +73,15 @@ object CharacterRoster {
                 }
             }
         }
-        val bytes = runCatching { Base64.decode(encoded, Base64.DEFAULT) }.getOrNull() ?: return null
-        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        val bytes = runCatching { Base64.decode(encoded, Base64.DEFAULT) }
+            .onFailure { Log.e(TAG, "sprite_decode_failed id=${definition.id}", it) }
+            .getOrNull() ?: return null
+        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        if (bitmap == null) {
+            Log.e(TAG, "sprite_load_failed id=${definition.id} source=assets reason=bitmap_decode")
+        } else {
+            Log.i(TAG, "sprite_loaded id=${definition.id} width=${bitmap.width} height=${bitmap.height}")
+        }
+        return bitmap
     }
 }
