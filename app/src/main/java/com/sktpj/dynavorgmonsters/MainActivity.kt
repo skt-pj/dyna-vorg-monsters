@@ -24,6 +24,14 @@ class MainActivity : Activity() {
                 View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
                 View.SYSTEM_UI_FLAG_LAYOUT_STABLE
             )
-        setContentView(SpriteGameContainer(this))
+        showCharacterSelect()
+    }
+
+    private fun showCharacterSelect() {
+        setContentView(
+            CharacterSelectView(this) { player, enemy ->
+                setContentView(SpriteGameContainer(this, player, enemy))
+            },
+        )
     }
 }
