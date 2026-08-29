@@ -50,6 +50,7 @@ jobs:
           RELEASE_APK="app/build/outputs/apk/release/app-release.apk"
           DEBUG_APK="app/build/outputs/apk/debug/app-debug.apk"
           EXPECTED_CERT="E6:48:32:00:71:B8:AB:0D:E0:38:F7:67:90:06:4B:99:46:1B:67:D7:DB:E7:CE:75:06:D1:2A:5F:4F:A8:84:D8"
+          EXPECTED_CERT_NORMALIZED="$(printf '%s' "$EXPECTED_CERT" | tr -d ':' | tr '[:upper:]' '[:lower:]')"
           APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
 
           mkdir -p dist
@@ -57,8 +58,8 @@ jobs:
           cp "$DEBUG_APK" "dist/dyna-vorg-monsters-${VERSION_NAME}-debug.apk"
           sha256sum "dist/dyna-vorg-monsters-${VERSION_NAME}-release.apk" > "dist/dyna-vorg-monsters-${VERSION_NAME}-release.apk.sha256"
           "$APKSIGNER" verify --verbose --print-certs "dist/dyna-vorg-monsters-${VERSION_NAME}-release.apk" > dist/signing-certificate.txt
-          ACTUAL_CERT="$(grep 'Signer #1 certificate SHA-256 digest:' dist/signing-certificate.txt | head -1 | sed 's/.*digest: //')"
-          if [[ "$ACTUAL_CERT" != "$EXPECTED_CERT" ]]; then
+          ACTUAL_CERT="$(grep 'Signer #1 certificate SHA-256 digest:' dist/signing-certificate.txt | head -1 | sed 's/.*digest: //' | tr '[:upper:]' '[:lower:]')"
+          if [[ "$ACTUAL_CERT" != "$EXPECTED_CERT_NORMALIZED" ]]; then
             echo "Unexpected signer certificate: $ACTUAL_CERT" >&2
             exit 1
           fi
@@ -74,7 +75,7 @@ jobs:
           unit_test=:app:testDebugUnitTest SUCCESS
           debug_build=:app:assembleDebug SUCCESS
           release_build=:app:assembleRelease SUCCESS
-          signer_sha256=${ACTUAL_CERT}
+          signer_sha256=${EXPECTED_CERT}
           EOF
 
       - name: Upload APK artifact
