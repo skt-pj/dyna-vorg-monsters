@@ -9,6 +9,7 @@ import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Shader
+import android.util.Log
 import android.view.MotionEvent
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -21,6 +22,8 @@ class SpriteGameContainer(
     private val enemyDefinition: CharacterDefinition,
 ) : FrameLayout(context) {
     private companion object {
+        const val TAG = "DVMCharacter"
+
         const val ROW_FORWARD = 0
         const val ROW_BACKWARD = 1
         const val ROW_JUMP = 2
@@ -70,6 +73,11 @@ class SpriteGameContainer(
             gameView,
             LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),
         )
+        Log.i(
+            TAG,
+            "battle_sprite_container player=${playerDefinition.id}:${playerSheet?.width}x${playerSheet?.height} " +
+                "enemy=${enemyDefinition.id}:${enemySheet?.width}x${enemySheet?.height}",
+        )
     }
 
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
@@ -98,8 +106,7 @@ class SpriteGameContainer(
     override fun dispatchDraw(canvas: Canvas) {
         super.dispatchDraw(canvas)
         if (width <= 0 || height <= 0) return
-        val playerBitmap = playerSheet ?: return
-        val enemyBitmap = enemySheet ?: return
+
         val logic = runCatching { logicField.get(gameView) as GameLogic }.getOrNull() ?: return
         val horizontal = runCatching { joystickHorizontalField.getFloat(gameView) }.getOrDefault(0f)
         val now = System.nanoTime()
@@ -137,15 +144,19 @@ class SpriteGameContainer(
 
         redrawArenaBehindFighter(
             canvas,
-            RectF(logic.player.x - 145f, logic.player.y - 330f, logic.player.x + 145f, logic.player.y + 24f),
+            RectF(logic.player.x - 245f, logic.player.y - 460f, logic.player.x + 245f, logic.player.y + 24f),
         )
         redrawArenaBehindFighter(
             canvas,
-            RectF(logic.enemy.x - 245f, logic.enemy.y - 260f, logic.enemy.x + 170f, logic.enemy.y + 24f),
+            RectF(logic.enemy.x - 275f, logic.enemy.y - 460f, logic.enemy.x + 275f, logic.enemy.y + 24f),
         )
 
-        drawSprite(canvas, playerBitmap, playerDefinition, logic.player, playerMotion)
-        drawSprite(canvas, enemyBitmap, enemyDefinition, logic.enemy, enemyMotion)
+        playerSheet?.let { bitmap ->
+            drawSprite(canvas, bitmap, playerDefinition, logic.player, playerMotion)
+        }
+        enemySheet?.let { bitmap ->
+            drawSprite(canvas, bitmap, enemyDefinition, logic.enemy, enemyMotion)
+        }
         canvas.restore()
 
         postInvalidateOnAnimation()
@@ -205,11 +216,18 @@ class SpriteGameContainer(
         val bottom = (motion.row + 1) * sheet.height / definition.rows
         val src = Rect(left, top, right, bottom)
 
+        val fitted = SpriteGeometry.fitInside(
+            sourceWidth = right - left,
+            sourceHeight = bottom - top,
+            maxWidth = definition.drawWidth,
+            maxHeight = definition.drawHeight,
+        )
+
         canvas.save()
         canvas.translate(fighter.x, fighter.y)
         canvas.scale(fighter.facing, 1f)
-        val halfWidth = definition.drawWidth / 2f
-        val dst = RectF(-halfWidth, -definition.drawHeight, halfWidth, 0f)
+        val halfWidth = fitted.width / 2f
+        val dst = RectF(-halfWidth, -fitted.height, halfWidth, 0f)
         canvas.drawBitmap(sheet, src, dst, spritePaint)
         canvas.restore()
     }
