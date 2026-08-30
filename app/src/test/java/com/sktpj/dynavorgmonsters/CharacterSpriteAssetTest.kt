@@ -7,11 +7,12 @@ import java.io.File
 
 class CharacterSpriteAssetTest {
     @Test
-    fun bundledAdditionalSpriteAssetsDecodeToExpectedWebpSizes() {
+    fun bundledSpriteAssetsDecodeToExpectedWebpSizes() {
         val workingDirectory = File(System.getProperty("user.dir"))
         val projectRoot = sequenceOf(workingDirectory, workingDirectory.parentFile)
             .filterNotNull()
             .first { File(it, "app/src/main/assets/sprites").isDirectory }
+        assertSprite(projectRoot, "minotaur", expectedWidth = 256, expectedHeight = 256)
         assertSprite(projectRoot, "kaiju", expectedWidth = 280, expectedHeight = 320)
         assertSprite(projectRoot, "dragon", expectedWidth = 224, expectedHeight = 256)
     }
